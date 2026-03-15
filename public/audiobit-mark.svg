@@ -1,0 +1,29 @@
+<svg width="1024" height="1024" viewBox="0 0 1024 1024" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="bg" x1="182" y1="110" x2="866" y2="910" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#F5A73F" />
+      <stop offset="0.52" stop-color="#E3851E" />
+      <stop offset="1" stop-color="#B45208" />
+    </linearGradient>
+    <linearGradient id="rim" x1="174" y1="122" x2="834" y2="898" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#FFD1A0" stop-opacity="0.92" />
+      <stop offset="0.45" stop-color="#F3A04A" stop-opacity="0.5" />
+      <stop offset="1" stop-color="#7F3400" stop-opacity="0.8" />
+    </linearGradient>
+    <filter id="shadow" x="34" y="44" width="956" height="956" filterUnits="userSpaceOnUse" color-interpolation-filters="sRGB">
+      <feDropShadow dx="0" dy="22" stdDeviation="20" flood-color="#000000" flood-opacity="0.35" />
+    </filter>
+  </defs>
+  <g filter="url(#shadow)">
+    <rect x="64" y="64" width="896" height="896" rx="178" fill="url(#bg)" />
+    <rect x="69" y="69" width="886" height="886" rx="173" stroke="url(#rim)" stroke-width="10" />
+    <path d="M126 232C126 163.517 181.517 108 250 108H774C842.483 108 898 163.517 898 232V270C898 201.517 842.483 146 774 146H250C181.517 146 126 201.517 126 270V232Z" fill="#FFF3E4" fill-opacity="0.32" />
+    <path d="M148 796C194.416 887.685 312.317 948 512 948C711.683 948 829.584 887.685 876 796V836C876 904.483 820.483 960 752 960H272C203.517 960 148 904.483 148 836V796Z" fill="#7F3400" fill-opacity="0.18" />
+  </g>
+  <g stroke="#FFFFFF" stroke-width="38" stroke-linecap="square">
+    <path d="M286 460C346.156 399.844 424.115 369.765 512 369.765C599.885 369.765 677.844 399.844 738 460" />
+    <path d="M360 539C400.252 498.748 452.395 478.622 512 478.622C571.605 478.622 623.748 498.748 664 539" />
+    <path d="M429 617C452.307 593.693 482.493 582.039 512 582.039C541.507 582.039 571.693 593.693 595 617" />
+  </g>
+  <path d="M512 718L548 754L512 790L476 754L512 718Z" fill="#FFFFFF" />
+</svg>
