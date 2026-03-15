@@ -40,7 +40,7 @@ export default function Connect({
             <div className="section-head">
               <h1>Connect to AudioBit</h1>
               <p className="subtext">
-                Scan your pairing QR or enter the session details manually.
+                Scan the pairing QR to connect instantly, or enter the session details manually.
               </p>
             </div>
 
@@ -66,7 +66,7 @@ export default function Connect({
             <div className="manual-form">
               <div className="row-label">
                 <Link2 size={16} />
-                <span>Enter 6-digit code</span>
+                <span>Manual pairing</span>
               </div>
 
               <label className="field-label">
@@ -79,6 +79,7 @@ export default function Connect({
                   onChange={(event) => onSessionIdChange(event.target.value)}
                   autoCapitalize="none"
                   autoCorrect="off"
+                  spellCheck={false}
                 />
               </label>
 
@@ -94,6 +95,7 @@ export default function Connect({
                     onPairCodeChange(event.target.value.replace(/\D/g, "").slice(0, 6))
                   }
                   inputMode="numeric"
+                  autoComplete="one-time-code"
                 />
               </label>
             </div>

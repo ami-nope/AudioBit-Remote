@@ -260,18 +260,106 @@ const applyLevels = (message, previousState) => {
   };
 };
 
-const parseQRCode = (text) => {
-  try {
-    const url = new URL(text);
-    const sid = url.searchParams.get("sid");
-    const code = (url.searchParams.get("code") || "").replace(/\D/g, "").slice(0, 6);
-    if (!sid || code.length !== 6) {
-      return null;
-    }
-    return { sid, code };
-  } catch {
+const SESSION_KEYS = ["sid", "sessionId", "session_id", "session"];
+const CODE_KEYS = ["code", "pairCode", "pair_code", "pairingCode", "pin"];
+
+const buildPairingPayload = (sidValue, codeValue) => {
+  const sid = String(sidValue ?? "").trim();
+  const code = String(codeValue ?? "")
+    .replace(/\D/g, "")
+    .slice(0, 6);
+
+  if (!sid || code.length !== 6) {
     return null;
   }
+
+  return { sid, code };
+};
+
+const readParams = (params) =>
+  buildPairingPayload(
+    SESSION_KEYS.map((key) => params.get(key)).find((value) => value?.trim()),
+    CODE_KEYS.map((key) => params.get(key)).find(
+      (value) => String(value ?? "").replace(/\D/g, "").length >= 6
+    )
+  );
+
+const readObject = (value) => {
+  if (!value || typeof value !== "object") {
+    return null;
+  }
+
+  return buildPairingPayload(
+    firstDefined(
+      value.sid,
+      value.sessionId,
+      value.session_id,
+      value.session,
+      value.id
+    ),
+    firstDefined(
+      value.code,
+      value.pairCode,
+      value.pair_code,
+      value.pairingCode,
+      value.pin
+    )
+  );
+};
+
+const parseQRCode = (text) => {
+  const raw = String(text ?? "").trim();
+  if (!raw) {
+    return null;
+  }
+
+  if (raw.startsWith("{")) {
+    try {
+      const parsed = readObject(JSON.parse(raw));
+      if (parsed) {
+        return parsed;
+      }
+    } catch {
+      // Ignore malformed JSON payloads and continue with other formats.
+    }
+  }
+
+  const urlCandidates = [raw];
+  if (!raw.includes("://") && (raw.includes("=") || raw.startsWith("?"))) {
+    urlCandidates.push(
+      `https://pair.audiobit.app/${raw.startsWith("?") ? raw : `?${raw}`}`
+    );
+  }
+
+  for (const candidate of urlCandidates) {
+    try {
+      const url = new URL(candidate);
+      const fromSearch = readParams(url.searchParams);
+      if (fromSearch) {
+        return fromSearch;
+      }
+
+      if (url.hash.includes("=")) {
+        const fromHash = readParams(
+          new URLSearchParams(url.hash.replace(/^#/, "").replace(/^\?/, ""))
+        );
+        if (fromHash) {
+          return fromHash;
+        }
+      }
+    } catch {
+      // Ignore invalid URL candidates.
+    }
+  }
+
+  const sessionMatch = raw.match(
+    /(?:sid|session(?:_id)?|sessionId)\s*[:=]\s*([a-z0-9_-]+)/i
+  );
+  const codeMatch = raw.match(
+    /(?:pair(?:ing)?_?\s*code|pairCode|code|pin)\s*[:=]\s*(\d{6})/i
+  );
+
+  return buildPairingPayload(sessionMatch?.[1], codeMatch?.[1]);
 };
 
 export default function App() {
@@ -380,6 +468,11 @@ export default function App() {
       clearTimeout(pulseTimeoutRef.current);
     }
     pulseTimeoutRef.current = setTimeout(() => setPulseKey(""), 520);
+  }, []);
+
+  const resetConnectFeedback = useCallback(() => {
+    setConnectError("");
+    setConnectStatus((current) => (current === "error" ? "idle" : current));
   }, []);
 
   const connectWith = useCallback(
@@ -716,21 +809,38 @@ export default function App() {
     (text) => {
       const parsed = parseQRCode(text);
       if (!parsed) {
-        setConnectError("Invalid QR format. Use AudioBit pairing QR.");
-        setConnectStatus("error");
-        return;
+        setConnectError("This QR code is not a valid AudioBit pairing QR.");
+        setConnectStatus("idle");
+        return false;
       }
 
       setConnectError("");
       connectWith(parsed.sid, parsed.code);
+      return true;
     },
     [connectWith]
   );
 
   const handleScannerError = useCallback((errorMessage) => {
-    setConnectStatus("error");
+    setConnectStatus("idle");
     setConnectError(errorMessage);
   }, []);
+
+  const handleSessionIdChange = useCallback(
+    (value) => {
+      resetConnectFeedback();
+      setSessionId(value);
+    },
+    [resetConnectFeedback]
+  );
+
+  const handlePairCodeChange = useCallback(
+    (value) => {
+      resetConnectFeedback();
+      setPairCode(value);
+    },
+    [resetConnectFeedback]
+  );
 
   useEffect(() => {
     if (autoConnectAttemptedRef.current) {
@@ -759,8 +869,8 @@ export default function App() {
           pairCode={pairCode}
           status={connectStatus}
           error={connectError}
-          onSessionIdChange={setSessionId}
-          onPairCodeChange={setPairCode}
+          onSessionIdChange={handleSessionIdChange}
+          onPairCodeChange={handlePairCodeChange}
           onConnect={() => connectWith(sessionId, pairCode)}
           onQRScanText={handleQRScanText}
           onScannerError={handleScannerError}
