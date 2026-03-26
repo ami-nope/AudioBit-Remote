@@ -14,7 +14,12 @@ const INITIAL_STATUS = {
   text: "Scanner idle",
 };
 
+const FAST_SCAN_FPS = 20;
+const QRBOX_MIN_EDGE = 180;
+const QRBOX_MAX_EDGE = 252;
+const QRBOX_RATIO = 0.68;
 const REAR_CAMERA_PATTERN = /back|rear|environment|world|wide|ultra/i;
+const FRONT_CAMERA_PATTERN = /front|user|selfie|face\s?time/i;
 
 const pickPreferredCameraId = (cameras, requestedCameraId) => {
   if (!Array.isArray(cameras) || cameras.length === 0) {
@@ -26,6 +31,46 @@ const pickPreferredCameraId = (cameras, requestedCameraId) => {
   }
 
   return cameras.find((camera) => REAR_CAMERA_PATTERN.test(camera.label))?.id || cameras[0].id;
+};
+
+const getCameraFacingMode = (camera) => {
+  const label = camera?.label || "";
+
+  if (REAR_CAMERA_PATTERN.test(label)) {
+    return "environment";
+  }
+
+  if (FRONT_CAMERA_PATTERN.test(label)) {
+    return "user";
+  }
+
+  return undefined;
+};
+
+const buildCameraVideoConstraints = (cameras, cameraId) => {
+  const selectedCamera = cameras.find((camera) => camera.id === cameraId);
+  const facingMode = getCameraFacingMode(selectedCamera);
+
+  return {
+    ...(cameraId
+      ? { deviceId: { exact: cameraId } }
+      : { facingMode: { ideal: "environment" } }),
+    ...(facingMode ? { facingMode: { ideal: facingMode } } : {}),
+    width: { ideal: 1280 },
+    height: { ideal: 720 },
+  };
+};
+
+const getQrBoxSize = (viewfinderWidth, viewfinderHeight) => {
+  const edge = Math.max(
+    QRBOX_MIN_EDGE,
+    Math.min(
+      QRBOX_MAX_EDGE,
+      Math.round(Math.min(viewfinderWidth, viewfinderHeight) * QRBOX_RATIO)
+    )
+  );
+
+  return { width: edge, height: edge };
 };
 
 const describeScannerError = (error, cameraCount) => {
@@ -241,6 +286,14 @@ export default function QRScanner({ active, onScan, onScannerError }) {
           discoveredCameras,
           requestedCameraId
         );
+        const resolvedCamera = discoveredCameras.find(
+          (camera) => camera.id === resolvedCameraId
+        );
+        const disableFlip = getCameraFacingMode(resolvedCamera) === "environment";
+        const videoConstraints = buildCameraVideoConstraints(
+          discoveredCameras,
+          resolvedCameraId
+        );
         currentCameraIdRef.current = resolvedCameraId;
         setCameras(discoveredCameras);
         setActiveCameraId(resolvedCameraId);
@@ -255,23 +308,11 @@ export default function QRScanner({ active, onScan, onScannerError }) {
         await scanner.start(
           resolvedCameraId || { facingMode: "environment" },
           {
-            fps: 12,
-            qrbox: (viewfinderWidth, viewfinderHeight) => {
-              const edge = Math.max(
-                180,
-                Math.min(
-                  280,
-                  Math.round(Math.min(viewfinderWidth, viewfinderHeight) * 0.72)
-                )
-              );
-
-              return { width: edge, height: edge };
-            },
+            fps: FAST_SCAN_FPS,
+            qrbox: getQrBoxSize,
             aspectRatio: 1,
-            videoConstraints: {
-              width: { ideal: 1280 },
-              height: { ideal: 720 },
-            },
+            disableFlip,
+            videoConstraints,
           },
           (decodedText) => {
             void handleDecoded(decodedText, scanner);
