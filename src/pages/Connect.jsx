@@ -1,12 +1,16 @@
 import { useMemo, useState } from "react";
 import { CheckCircle2, QrCode, Link2 } from "lucide-react";
+import HostSwitcher from "../components/HostSwitcher";
 import QRScanner from "../components/QRScanner";
 
 export default function Connect({
+  hosts,
+  activeHostIndex,
   sessionId,
   pairCode,
   status,
   error,
+  onSelectHost,
   onSessionIdChange,
   onPairCodeChange,
   onConnect,
@@ -29,18 +33,26 @@ export default function Connect({
   return (
     <main className="screen connect-screen">
       <section className="panel connect-card">
+        <HostSwitcher
+          hosts={hosts}
+          activeHostIndex={activeHostIndex}
+          onSelectHost={onSelectHost}
+          compact
+        />
+
         {isConnected ? (
           <div className="connect-success">
             <CheckCircle2 size={54} />
-            <h1>Connected to AudioBit</h1>
+            <h1>{`Host ${activeHostIndex + 1} connected`}</h1>
             <p>Opening remote controls...</p>
           </div>
         ) : (
           <>
             <div className="section-head">
-              <h1>Connect to AudioBit</h1>
+              <h1>{`Connect Host ${activeHostIndex + 1}`}</h1>
               <p className="subtext">
                 Scan the pairing QR to connect instantly, or enter the session details manually.
+                You can keep up to two host connections open at the same time.
               </p>
             </div>
 
@@ -108,7 +120,7 @@ export default function Connect({
               disabled={!canSubmit}
               onClick={onConnect}
             >
-              {isConnecting ? "Connecting..." : "Connect"}
+              {isConnecting ? "Connecting..." : `Connect Host ${activeHostIndex + 1}`}
             </button>
           </>
         )}

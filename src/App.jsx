@@ -3,7 +3,9 @@ import Connect from "./pages/Connect";
 import Control from "./pages/Control";
 import { AudioBitWebSocket, RELAY_WS_URL } from "./services/websocket";
 
-const INITIAL_AUDIO_STATE = {
+const HOST_CONNECTION_LIMIT = 2;
+
+const createInitialAudioState = () => ({
   masterVolume: 70,
   masterMuted: false,
   micMuted: false,
@@ -12,7 +14,25 @@ const INITIAL_AUDIO_STATE = {
   inputDevices: [{ id: "default_in", name: "Default Input" }],
   outputDeviceId: "default_out",
   inputDeviceId: "default_in",
-};
+});
+
+const createHostSlot = () => ({
+  sessionId: "",
+  pairCode: "",
+  connectStatus: "idle",
+  connectError: "",
+  audioState: createInitialAudioState(),
+  relayOnline: false,
+  pulseKey: "",
+});
+
+const createInitialHostSlots = () =>
+  Array.from({ length: HOST_CONNECTION_LIMIT }, () => createHostSlot());
+
+const getHostLabel = (slotIndex) => `Host ${slotIndex + 1}`;
+
+const findOtherConnectedHostIndex = (hostSlots, excludedIndex) =>
+  hostSlots.findIndex((slot, index) => index !== excludedIndex && slot.relayOnline);
 
 const clampPercent = (value) => {
   const parsed = Number(value);
@@ -364,33 +384,77 @@ const parseQRCode = (text) => {
 
 export default function App() {
   const [screen, setScreen] = useState("connect");
-  const [sessionId, setSessionId] = useState("");
-  const [pairCode, setPairCode] = useState("");
-  const [connectStatus, setConnectStatus] = useState("idle");
-  const [connectError, setConnectError] = useState("");
-  const [audioState, setAudioState] = useState(INITIAL_AUDIO_STATE);
-  const [relayOnline, setRelayOnline] = useState(false);
+  const [hostSlots, setHostSlots] = useState(() => createInitialHostSlots());
+  const [activeHostIndex, setActiveHostIndex] = useState(0);
   const [toast, setToast] = useState(null);
-  const [pulseKey, setPulseKey] = useState("");
 
-  const socketRef = useRef(null);
   const screenRef = useRef("connect");
+  const hostSlotsRef = useRef(hostSlots);
+  const activeHostIndexRef = useRef(0);
   const toastTimeoutRef = useRef(null);
-  const transitionTimeoutRef = useRef(null);
-  const pulseTimeoutRef = useRef(null);
+  const socketsRef = useRef(Array.from({ length: HOST_CONNECTION_LIMIT }, () => null));
+  const pairingTimeoutRef = useRef(Array.from({ length: HOST_CONNECTION_LIMIT }, () => null));
+  const transitionTimeoutRef = useRef(
+    Array.from({ length: HOST_CONNECTION_LIMIT }, () => null)
+  );
+  const pulseTimeoutRef = useRef(Array.from({ length: HOST_CONNECTION_LIMIT }, () => null));
   const autoConnectAttemptedRef = useRef(false);
-  const masterVolumeDebounceRef = useRef(null);
-  const appVolumeDebounceRef = useRef(new Map());
-  const pendingMasterVolumeUntilRef = useRef(0);
-  const pendingAppVolumeUntilRef = useRef(new Map());
-  const pendingOutputDeviceUntilRef = useRef(0);
-  const pendingInputDeviceUntilRef = useRef(0);
-  const pendingAppOutputDeviceUntilRef = useRef(new Map());
-  const pendingAppInputDeviceUntilRef = useRef(new Map());
+  const masterVolumeDebounceRef = useRef(
+    Array.from({ length: HOST_CONNECTION_LIMIT }, () => null)
+  );
+  const appVolumeDebounceRef = useRef(
+    Array.from({ length: HOST_CONNECTION_LIMIT }, () => new Map())
+  );
+  const pendingMasterVolumeUntilRef = useRef(
+    Array.from({ length: HOST_CONNECTION_LIMIT }, () => 0)
+  );
+  const pendingAppVolumeUntilRef = useRef(
+    Array.from({ length: HOST_CONNECTION_LIMIT }, () => new Map())
+  );
+  const pendingOutputDeviceUntilRef = useRef(
+    Array.from({ length: HOST_CONNECTION_LIMIT }, () => 0)
+  );
+  const pendingInputDeviceUntilRef = useRef(
+    Array.from({ length: HOST_CONNECTION_LIMIT }, () => 0)
+  );
+  const pendingAppOutputDeviceUntilRef = useRef(
+    Array.from({ length: HOST_CONNECTION_LIMIT }, () => new Map())
+  );
+  const pendingAppInputDeviceUntilRef = useRef(
+    Array.from({ length: HOST_CONNECTION_LIMIT }, () => new Map())
+  );
 
   useEffect(() => {
     screenRef.current = screen;
   }, [screen]);
+
+  useEffect(() => {
+    hostSlotsRef.current = hostSlots;
+  }, [hostSlots]);
+
+  useEffect(() => {
+    activeHostIndexRef.current = activeHostIndex;
+  }, [activeHostIndex]);
+
+  const clearSlotTimeout = useCallback((timeoutsRef, slotIndex) => {
+    const timeoutId = timeoutsRef.current[slotIndex];
+    if (!timeoutId) {
+      return;
+    }
+    clearTimeout(timeoutId);
+    timeoutsRef.current[slotIndex] = null;
+  }, []);
+
+  const setHostSlot = useCallback((slotIndex, updater) => {
+    setHostSlots((previous) =>
+      previous.map((slot, index) => {
+        if (index !== slotIndex) {
+          return slot;
+        }
+        return typeof updater === "function" ? updater(slot) : { ...slot, ...updater };
+      })
+    );
+  }, []);
 
   const showToast = useCallback((message, tone = "ok") => {
     if (toastTimeoutRef.current) {
@@ -400,128 +464,189 @@ export default function App() {
     setToast({ id, message, tone });
     toastTimeoutRef.current = setTimeout(() => {
       setToast((current) => (current?.id === id ? null : current));
+      toastTimeoutRef.current = null;
     }, 2400);
   }, []);
 
-  const closeSocket = useCallback(() => {
-    socketRef.current?.close();
-    socketRef.current = null;
-    setRelayOnline(false);
-    pendingMasterVolumeUntilRef.current = 0;
-    pendingAppVolumeUntilRef.current.clear();
-    pendingOutputDeviceUntilRef.current = 0;
-    pendingInputDeviceUntilRef.current = 0;
-    pendingAppOutputDeviceUntilRef.current.clear();
-    pendingAppInputDeviceUntilRef.current.clear();
-    if (masterVolumeDebounceRef.current) {
-      clearTimeout(masterVolumeDebounceRef.current);
-      masterVolumeDebounceRef.current = null;
-    }
-    appVolumeDebounceRef.current.forEach((timeoutId) => {
-      clearTimeout(timeoutId);
-    });
-    appVolumeDebounceRef.current.clear();
-  }, []);
+  const clearHostCommandState = useCallback(
+    (slotIndex) => {
+      pendingMasterVolumeUntilRef.current[slotIndex] = 0;
+      pendingAppVolumeUntilRef.current[slotIndex].clear();
+      pendingOutputDeviceUntilRef.current[slotIndex] = 0;
+      pendingInputDeviceUntilRef.current[slotIndex] = 0;
+      pendingAppOutputDeviceUntilRef.current[slotIndex].clear();
+      pendingAppInputDeviceUntilRef.current[slotIndex].clear();
 
-  useEffect(() => {
-    const params = new URLSearchParams(window.location.search);
-    const sid = params.get("sid") || "";
-    const code = (params.get("code") || "").replace(/\D/g, "").slice(0, 6);
-    if (sid) {
-      setSessionId(sid);
-    }
-    if (code) {
-      setPairCode(code);
-    }
-  }, []);
+      clearSlotTimeout(masterVolumeDebounceRef, slotIndex);
 
-  useEffect(
-    () => () => {
-      closeSocket();
-      if (toastTimeoutRef.current) {
-        clearTimeout(toastTimeoutRef.current);
-      }
-      if (transitionTimeoutRef.current) {
-        clearTimeout(transitionTimeoutRef.current);
-      }
-      if (pulseTimeoutRef.current) {
-        clearTimeout(pulseTimeoutRef.current);
-      }
-      if (masterVolumeDebounceRef.current) {
-        clearTimeout(masterVolumeDebounceRef.current);
-      }
-      appVolumeDebounceRef.current.forEach((timeoutId) => {
+      appVolumeDebounceRef.current[slotIndex].forEach((timeoutId) => {
         clearTimeout(timeoutId);
       });
-      appVolumeDebounceRef.current.clear();
+      appVolumeDebounceRef.current[slotIndex].clear();
+
+      clearSlotTimeout(pulseTimeoutRef, slotIndex);
     },
-    [closeSocket]
+    [clearSlotTimeout]
   );
 
-  const triggerPulse = useCallback((key) => {
-    if (!key) {
-      return;
-    }
-    setPulseKey("");
-    requestAnimationFrame(() => setPulseKey(key));
-    if (pulseTimeoutRef.current) {
-      clearTimeout(pulseTimeoutRef.current);
-    }
-    pulseTimeoutRef.current = setTimeout(() => setPulseKey(""), 520);
-  }, []);
+  const disposeHostConnection = useCallback(
+    (slotIndex) => {
+      clearSlotTimeout(pairingTimeoutRef, slotIndex);
+      clearSlotTimeout(transitionTimeoutRef, slotIndex);
+      clearHostCommandState(slotIndex);
 
-  const resetConnectFeedback = useCallback(() => {
-    setConnectError("");
-    setConnectStatus((current) => (current === "error" ? "idle" : current));
-  }, []);
-
-  const connectWith = useCallback(
-    (sid, code) => {
-      const normalizedSid = sid.trim();
-      const normalizedCode = code.replace(/\D/g, "").slice(0, 6);
-
-      if (!normalizedSid || normalizedCode.length !== 6) {
-        setConnectError("Enter a valid Session ID and 6-digit pairing code.");
-        setConnectStatus("error");
+      const socket = socketsRef.current[slotIndex];
+      if (!socket) {
         return;
       }
 
-      setSessionId(normalizedSid);
-      setPairCode(normalizedCode);
-      setConnectStatus("connecting");
-      setConnectError("");
-      setRelayOnline(false);
+      socket.close();
+      socketsRef.current[slotIndex] = null;
+    },
+    [clearHostCommandState, clearSlotTimeout]
+  );
 
-      closeSocket();
+  useEffect(
+    () => () => {
+      for (let slotIndex = 0; slotIndex < HOST_CONNECTION_LIMIT; slotIndex += 1) {
+        disposeHostConnection(slotIndex);
+      }
+
+      if (toastTimeoutRef.current) {
+        clearTimeout(toastTimeoutRef.current);
+      }
+    },
+    [disposeHostConnection]
+  );
+
+  const triggerPulse = useCallback(
+    (slotIndex, key) => {
+      if (!key) {
+        return;
+      }
+
+      setHostSlot(slotIndex, (slot) => ({ ...slot, pulseKey: "" }));
+      requestAnimationFrame(() => {
+        setHostSlot(slotIndex, (slot) => ({ ...slot, pulseKey: key }));
+      });
+
+      clearSlotTimeout(pulseTimeoutRef, slotIndex);
+      pulseTimeoutRef.current[slotIndex] = setTimeout(() => {
+        setHostSlot(slotIndex, (slot) => ({ ...slot, pulseKey: "" }));
+        pulseTimeoutRef.current[slotIndex] = null;
+      }, 520);
+    },
+    [clearSlotTimeout, setHostSlot]
+  );
+
+  const resetConnectFeedback = useCallback(
+    (slotIndex) => {
+      setHostSlot(slotIndex, (slot) => ({
+        ...slot,
+        connectError: "",
+        connectStatus: slot.connectStatus === "error" ? "idle" : slot.connectStatus,
+      }));
+    },
+    [setHostSlot]
+  );
+
+  const selectHostSlot = useCallback((slotIndex) => {
+    setActiveHostIndex(slotIndex);
+
+    const slot = hostSlotsRef.current[slotIndex];
+    if (!slot) {
+      return;
+    }
+
+    setScreen(slot.relayOnline || slot.connectStatus === "connected" ? "control" : "connect");
+  }, []);
+
+  const connectWith = useCallback(
+    (slotIndex, sid, code) => {
+      const normalizedSid = sid.trim();
+      const normalizedCode = code.replace(/\D/g, "").slice(0, 6);
+
+      setActiveHostIndex(slotIndex);
+      setScreen("connect");
+
+      if (!normalizedSid || normalizedCode.length !== 6) {
+        setHostSlot(slotIndex, (slot) => ({
+          ...slot,
+          connectError: "Enter a valid Session ID and 6-digit pairing code.",
+          connectStatus: "error",
+        }));
+        return;
+      }
+
+      disposeHostConnection(slotIndex);
+      setHostSlot(slotIndex, (slot) => ({
+        ...slot,
+        sessionId: normalizedSid,
+        pairCode: normalizedCode,
+        connectStatus: "connecting",
+        connectError: "",
+        relayOnline: false,
+        pulseKey: "",
+      }));
+
       const socket = new AudioBitWebSocket(RELAY_WS_URL);
-      socketRef.current = socket;
+      socketsRef.current[slotIndex] = socket;
 
       let established = false;
-      const timeout = setTimeout(() => {
-        if (established) {
-          return;
-        }
-        socket.close();
-        setConnectStatus("error");
-        setConnectError("Pairing timed out. Confirm session ID and code.");
-      }, 10000);
+      let connectFailureMessage = "";
+      let failureToastShown = false;
 
       const onConnected = () => {
-        if (established) {
+        if (established || socketsRef.current[slotIndex] !== socket) {
           return;
         }
+
         established = true;
-        clearTimeout(timeout);
-        setConnectStatus("connected");
-        setConnectError("");
-        setRelayOnline(true);
-        if (transitionTimeoutRef.current) {
-          clearTimeout(transitionTimeoutRef.current);
+        clearSlotTimeout(pairingTimeoutRef, slotIndex);
+        setHostSlot(slotIndex, (slot) => ({
+          ...slot,
+          connectStatus: "connected",
+          connectError: "",
+          relayOnline: true,
+        }));
+
+        const isForegroundConnect =
+          activeHostIndexRef.current === slotIndex && screenRef.current === "connect";
+
+        if (isForegroundConnect) {
+          clearSlotTimeout(transitionTimeoutRef, slotIndex);
+          transitionTimeoutRef.current[slotIndex] = setTimeout(() => {
+            transitionTimeoutRef.current[slotIndex] = null;
+            if (activeHostIndexRef.current === slotIndex) {
+              setScreen("control");
+            }
+          }, 700);
+          return;
         }
-        transitionTimeoutRef.current = setTimeout(() => {
-          setScreen("control");
-        }, 700);
+
+        showToast(`${getHostLabel(slotIndex)} connected.`, "ok");
       };
+
+      pairingTimeoutRef.current[slotIndex] = setTimeout(() => {
+        if (established || socketsRef.current[slotIndex] !== socket) {
+          return;
+        }
+
+        connectFailureMessage = "Pairing timed out. Confirm session ID and code.";
+        socket.close();
+        pairingTimeoutRef.current[slotIndex] = null;
+        setHostSlot(slotIndex, (slot) => ({
+          ...slot,
+          relayOnline: false,
+          connectStatus: "error",
+          connectError: connectFailureMessage,
+        }));
+
+        if (activeHostIndexRef.current !== slotIndex || screenRef.current !== "connect") {
+          showToast(`${getHostLabel(slotIndex)} pairing timed out.`, "warn");
+          failureToastShown = true;
+        }
+      }, 10000);
 
       socket.connect({
         sid: normalizedSid,
@@ -529,35 +654,42 @@ export default function App() {
         handlers: {
           onReady: onConnected,
           onState: (message) => {
-            setAudioState((previous) => {
+            if (socketsRef.current[slotIndex] !== socket) {
+              return;
+            }
+
+            setHostSlot(slotIndex, (slot) => {
               const now = Date.now();
-              const next = normalizeState(message, previous);
+              const nextAudioState = normalizeState(message, slot.audioState);
 
-              if (pendingMasterVolumeUntilRef.current > now) {
-                next.masterVolume = previous.masterVolume;
+              if (pendingMasterVolumeUntilRef.current[slotIndex] > now) {
+                nextAudioState.masterVolume = slot.audioState.masterVolume;
               } else {
-                pendingMasterVolumeUntilRef.current = 0;
+                pendingMasterVolumeUntilRef.current[slotIndex] = 0;
               }
 
-              if (pendingOutputDeviceUntilRef.current > now) {
-                next.outputDeviceId = previous.outputDeviceId;
+              if (pendingOutputDeviceUntilRef.current[slotIndex] > now) {
+                nextAudioState.outputDeviceId = slot.audioState.outputDeviceId;
               } else {
-                pendingOutputDeviceUntilRef.current = 0;
+                pendingOutputDeviceUntilRef.current[slotIndex] = 0;
               }
 
-              if (pendingInputDeviceUntilRef.current > now) {
-                next.inputDeviceId = previous.inputDeviceId;
+              if (pendingInputDeviceUntilRef.current[slotIndex] > now) {
+                nextAudioState.inputDeviceId = slot.audioState.inputDeviceId;
               } else {
-                pendingInputDeviceUntilRef.current = 0;
+                pendingInputDeviceUntilRef.current[slotIndex] = 0;
               }
 
               if (
-                pendingAppVolumeUntilRef.current.size > 0 ||
-                pendingAppOutputDeviceUntilRef.current.size > 0 ||
-                pendingAppInputDeviceUntilRef.current.size > 0
+                pendingAppVolumeUntilRef.current[slotIndex].size > 0 ||
+                pendingAppOutputDeviceUntilRef.current[slotIndex].size > 0 ||
+                pendingAppInputDeviceUntilRef.current[slotIndex].size > 0
               ) {
-                const previousById = new Map(previous.apps.map((app) => [app.id, app]));
-                next.apps = next.apps.map((app) => {
+                const previousById = new Map(
+                  slot.audioState.apps.map((app) => [app.id, app])
+                );
+
+                nextAudioState.apps = nextAudioState.apps.map((app) => {
                   const previousApp = previousById.get(app.id);
                   if (!previousApp) {
                     return app;
@@ -565,19 +697,20 @@ export default function App() {
 
                   let nextApp = app;
 
-                  const volumeUntil = pendingAppVolumeUntilRef.current.get(app.id);
+                  const volumeUntil = pendingAppVolumeUntilRef.current[slotIndex].get(app.id);
                   if (volumeUntil) {
                     if (volumeUntil <= now) {
-                      pendingAppVolumeUntilRef.current.delete(app.id);
+                      pendingAppVolumeUntilRef.current[slotIndex].delete(app.id);
                     } else {
                       nextApp = { ...nextApp, volume: previousApp.volume };
                     }
                   }
 
-                  const outputUntil = pendingAppOutputDeviceUntilRef.current.get(app.id);
+                  const outputUntil =
+                    pendingAppOutputDeviceUntilRef.current[slotIndex].get(app.id);
                   if (outputUntil) {
                     if (outputUntil <= now) {
-                      pendingAppOutputDeviceUntilRef.current.delete(app.id);
+                      pendingAppOutputDeviceUntilRef.current[slotIndex].delete(app.id);
                     } else {
                       nextApp = {
                         ...nextApp,
@@ -586,10 +719,11 @@ export default function App() {
                     }
                   }
 
-                  const inputUntil = pendingAppInputDeviceUntilRef.current.get(app.id);
+                  const inputUntil =
+                    pendingAppInputDeviceUntilRef.current[slotIndex].get(app.id);
                   if (inputUntil) {
                     if (inputUntil <= now) {
-                      pendingAppInputDeviceUntilRef.current.delete(app.id);
+                      pendingAppInputDeviceUntilRef.current[slotIndex].delete(app.id);
                     } else {
                       nextApp = {
                         ...nextApp,
@@ -602,12 +736,23 @@ export default function App() {
                 });
               }
 
-              return next;
+              return {
+                ...slot,
+                audioState: nextAudioState,
+              };
             });
+
             onConnected();
           },
           onLevel: (message) => {
-            setAudioState((previous) => applyLevels(message, previous));
+            if (socketsRef.current[slotIndex] !== socket) {
+              return;
+            }
+
+            setHostSlot(slotIndex, (slot) => ({
+              ...slot,
+              audioState: applyLevels(message, slot.audioState),
+            }));
           },
           onCmdResult: (message) => {
             const result = message?.d ?? message;
@@ -619,267 +764,482 @@ export default function App() {
               : error === "not_supported"
                 ? "Soundboard clip is not supported on desktop yet."
                 : `Command failed${error ? `: ${error}` : "."}`;
-            showToast(text, ok ? "ok" : "warn");
+
+            showToast(`${getHostLabel(slotIndex)}: ${text}`, ok ? "ok" : "warn");
           },
           onError: (message) => {
-            if (established) {
-              showToast(message, "warn");
+            if (socketsRef.current[slotIndex] !== socket) {
               return;
             }
-            clearTimeout(timeout);
-            setConnectStatus("error");
-            setConnectError(message);
+
+            if (established) {
+              showToast(`${getHostLabel(slotIndex)}: ${message}`, "warn");
+              return;
+            }
+
+            connectFailureMessage = message;
+            clearSlotTimeout(pairingTimeoutRef, slotIndex);
+            setHostSlot(slotIndex, (slot) => ({
+              ...slot,
+              connectStatus: "error",
+              connectError: message,
+              relayOnline: false,
+            }));
+
+            if (activeHostIndexRef.current !== slotIndex || screenRef.current !== "connect") {
+              showToast(`${getHostLabel(slotIndex)}: ${message}`, "warn");
+              failureToastShown = true;
+            }
           },
           onClose: () => {
-            clearTimeout(timeout);
-            if (!established) {
-              setConnectStatus("error");
-              setConnectError("Connection closed before pairing completed.");
-              setRelayOnline(false);
+            if (socketsRef.current[slotIndex] !== socket) {
               return;
             }
-            if (screenRef.current === "control") {
-              setScreen("connect");
-              setConnectStatus("idle");
-              setRelayOnline(false);
-              showToast("Disconnected from AudioBit relay.", "warn");
+
+            socketsRef.current[slotIndex] = null;
+            clearSlotTimeout(pairingTimeoutRef, slotIndex);
+            clearSlotTimeout(transitionTimeoutRef, slotIndex);
+            clearHostCommandState(slotIndex);
+
+            if (!established) {
+              const message =
+                connectFailureMessage || "Connection closed before pairing completed.";
+
+              setHostSlot(slotIndex, (slot) => ({
+                ...slot,
+                connectStatus: "error",
+                connectError: message,
+                relayOnline: false,
+                pulseKey: "",
+              }));
+
+              if (activeHostIndexRef.current === slotIndex) {
+                setScreen("connect");
+              }
+
+              if (
+                (activeHostIndexRef.current !== slotIndex ||
+                  screenRef.current !== "connect") &&
+                !failureToastShown
+              ) {
+                showToast(`${getHostLabel(slotIndex)}: ${message}`, "warn");
+              }
+
+              return;
             }
+
+            const fallbackHostIndex = findOtherConnectedHostIndex(
+              hostSlotsRef.current,
+              slotIndex
+            );
+
+            setHostSlot(slotIndex, (slot) => ({
+              ...slot,
+              connectStatus: "idle",
+              relayOnline: false,
+              pulseKey: "",
+            }));
+
+            if (activeHostIndexRef.current === slotIndex && screenRef.current === "control") {
+              if (fallbackHostIndex >= 0) {
+                setActiveHostIndex(fallbackHostIndex);
+              } else {
+                setScreen("connect");
+              }
+            }
+
+            showToast(`${getHostLabel(slotIndex)} disconnected from AudioBit relay.`, "warn");
           },
         },
       });
     },
-    [closeSocket, showToast]
+    [
+      clearHostCommandState,
+      clearSlotTimeout,
+      disposeHostConnection,
+      setHostSlot,
+      showToast,
+    ]
   );
 
   const sendCommand = useCallback(
-    (payload, key) => {
-      const socket = socketRef.current;
+    (slotIndex, payload, key) => {
+      const socket = socketsRef.current[slotIndex];
       if (!socket || !socket.isOpen()) {
-        showToast("Not connected to AudioBit.", "warn");
+        showToast(`${getHostLabel(slotIndex)} is not connected.`, "warn");
         return false;
       }
+
       socket.sendCommand(payload);
-      triggerPulse(key);
+      triggerPulse(slotIndex, key);
       return true;
     },
     [showToast, triggerPulse]
   );
 
   const scheduleMasterVolumeCommand = useCallback(
-    (volume) => {
-      if (masterVolumeDebounceRef.current) {
-        clearTimeout(masterVolumeDebounceRef.current);
-      }
-      masterVolumeDebounceRef.current = setTimeout(() => {
-        sendCommand({ op: "set_master_volume", v: volume });
+    (slotIndex, volume) => {
+      clearSlotTimeout(masterVolumeDebounceRef, slotIndex);
+      masterVolumeDebounceRef.current[slotIndex] = setTimeout(() => {
+        masterVolumeDebounceRef.current[slotIndex] = null;
+        sendCommand(slotIndex, { op: "set_master_volume", v: volume });
       }, 90);
     },
-    [sendCommand]
+    [clearSlotTimeout, sendCommand]
   );
 
   const scheduleAppVolumeCommand = useCallback(
-    (appId, volume) => {
-      const existing = appVolumeDebounceRef.current.get(appId);
+    (slotIndex, appId, volume) => {
+      const existing = appVolumeDebounceRef.current[slotIndex].get(appId);
       if (existing) {
         clearTimeout(existing);
       }
 
       const timeoutId = setTimeout(() => {
-        sendCommand({ op: "set_app_volume", app: appId, v: volume });
-        appVolumeDebounceRef.current.delete(appId);
+        sendCommand(slotIndex, { op: "set_app_volume", app: appId, v: volume });
+        appVolumeDebounceRef.current[slotIndex].delete(appId);
       }, 90);
 
-      appVolumeDebounceRef.current.set(appId, timeoutId);
+      appVolumeDebounceRef.current[slotIndex].set(appId, timeoutId);
     },
     [sendCommand]
   );
 
   const handleMasterVolumeChange = useCallback(
     (volume) => {
+      const slotIndex = activeHostIndexRef.current;
       const next = clampPercent(volume);
-      pendingMasterVolumeUntilRef.current = Date.now() + 650;
-      setAudioState((previous) => ({ ...previous, masterVolume: next }));
-      scheduleMasterVolumeCommand(next);
+
+      pendingMasterVolumeUntilRef.current[slotIndex] = Date.now() + 650;
+      setHostSlot(slotIndex, (slot) => ({
+        ...slot,
+        audioState: {
+          ...slot.audioState,
+          masterVolume: next,
+        },
+      }));
+      scheduleMasterVolumeCommand(slotIndex, next);
     },
-    [scheduleMasterVolumeCommand]
+    [scheduleMasterVolumeCommand, setHostSlot]
   );
 
   const handleMasterMuteToggle = useCallback(() => {
-    setAudioState((previous) => {
-      const nextMuted = !previous.masterMuted;
-      sendCommand({ op: "mute_master", mu: nextMuted }, "mute_master");
-      return { ...previous, masterMuted: nextMuted };
-    });
-  }, [sendCommand]);
+    const slotIndex = activeHostIndexRef.current;
+    const slot = hostSlotsRef.current[slotIndex];
+    if (!slot) {
+      return;
+    }
+
+    const nextMuted = !slot.audioState.masterMuted;
+    setHostSlot(slotIndex, (current) => ({
+      ...current,
+      audioState: {
+        ...current.audioState,
+        masterMuted: nextMuted,
+      },
+    }));
+    sendCommand(slotIndex, { op: "mute_master", mu: nextMuted }, "mute_master");
+  }, [sendCommand, setHostSlot]);
 
   const handleMicToggle = useCallback(() => {
-    setAudioState((previous) => {
-      const nextMuted = !previous.micMuted;
-      sendCommand({ op: "mute_mic", mu: nextMuted }, "mute_mic");
-      return { ...previous, micMuted: nextMuted };
-    });
-  }, [sendCommand]);
+    const slotIndex = activeHostIndexRef.current;
+    const slot = hostSlotsRef.current[slotIndex];
+    if (!slot) {
+      return;
+    }
 
-  const handleAppVolumeChange = useCallback((appId, volume) => {
-    const next = clampPercent(volume);
-    pendingAppVolumeUntilRef.current.set(appId, Date.now() + 650);
-    setAudioState((previous) => ({
-      ...previous,
-      apps: previous.apps.map((app) => (app.id === appId ? { ...app, volume: next } : app)),
+    const nextMuted = !slot.audioState.micMuted;
+    setHostSlot(slotIndex, (current) => ({
+      ...current,
+      audioState: {
+        ...current.audioState,
+        micMuted: nextMuted,
+      },
     }));
-    scheduleAppVolumeCommand(appId, next);
-  }, [scheduleAppVolumeCommand]);
+    sendCommand(slotIndex, { op: "mute_mic", mu: nextMuted }, "mute_mic");
+  }, [sendCommand, setHostSlot]);
+
+  const handleAppVolumeChange = useCallback(
+    (appId, volume) => {
+      const slotIndex = activeHostIndexRef.current;
+      const next = clampPercent(volume);
+
+      pendingAppVolumeUntilRef.current[slotIndex].set(appId, Date.now() + 650);
+      setHostSlot(slotIndex, (slot) => ({
+        ...slot,
+        audioState: {
+          ...slot.audioState,
+          apps: slot.audioState.apps.map((app) =>
+            app.id === appId ? { ...app, volume: next } : app
+          ),
+        },
+      }));
+      scheduleAppVolumeCommand(slotIndex, appId, next);
+    },
+    [scheduleAppVolumeCommand, setHostSlot]
+  );
 
   const handleAppMuteToggle = useCallback(
     (appId, muted) => {
-      setAudioState((previous) => ({
-        ...previous,
-        apps: previous.apps.map((app) => (app.id === appId ? { ...app, muted } : app)),
+      const slotIndex = activeHostIndexRef.current;
+
+      setHostSlot(slotIndex, (slot) => ({
+        ...slot,
+        audioState: {
+          ...slot.audioState,
+          apps: slot.audioState.apps.map((app) =>
+            app.id === appId ? { ...app, muted } : app
+          ),
+        },
       }));
-      sendCommand({ op: "mute_app", app: appId, mu: muted }, `mute_app:${appId}`);
+      sendCommand(slotIndex, { op: "mute_app", app: appId, mu: muted }, `mute_app:${appId}`);
     },
-    [sendCommand]
+    [sendCommand, setHostSlot]
   );
 
-  const handleAppOutputDeviceChange = useCallback((appId, deviceId) => {
-    if (!isDefined(deviceId)) {
-      return;
-    }
-    const normalizedDeviceId = String(deviceId);
-    pendingAppOutputDeviceUntilRef.current.set(appId, Date.now() + 900);
-    setAudioState((previous) => ({
-      ...previous,
-      apps: previous.apps.map((app) =>
-        app.id === appId ? { ...app, outputDeviceId: normalizedDeviceId } : app
-      ),
-    }));
-    sendCommand(
-      { op: "set_app_output_device", app: appId, out: normalizedDeviceId }
-    );
-  }, [sendCommand]);
+  const handleAppOutputDeviceChange = useCallback(
+    (appId, deviceId) => {
+      const slotIndex = activeHostIndexRef.current;
+      if (!isDefined(deviceId)) {
+        return;
+      }
 
-  const handleAppInputDeviceChange = useCallback((appId, deviceId) => {
-    if (!isDefined(deviceId)) {
-      return;
-    }
-    const normalizedDeviceId = String(deviceId);
-    pendingAppInputDeviceUntilRef.current.set(appId, Date.now() + 900);
-    setAudioState((previous) => ({
-      ...previous,
-      apps: previous.apps.map((app) =>
-        app.id === appId ? { ...app, inputDeviceId: normalizedDeviceId } : app
-      ),
-    }));
-    sendCommand(
-      { op: "set_app_input_device", app: appId, in: normalizedDeviceId }
-    );
-  }, [sendCommand]);
+      const normalizedDeviceId = String(deviceId);
+      pendingAppOutputDeviceUntilRef.current[slotIndex].set(appId, Date.now() + 900);
+      setHostSlot(slotIndex, (slot) => ({
+        ...slot,
+        audioState: {
+          ...slot.audioState,
+          apps: slot.audioState.apps.map((app) =>
+            app.id === appId ? { ...app, outputDeviceId: normalizedDeviceId } : app
+          ),
+        },
+      }));
+      sendCommand(slotIndex, {
+        op: "set_app_output_device",
+        app: appId,
+        out: normalizedDeviceId,
+      });
+    },
+    [sendCommand, setHostSlot]
+  );
 
-  const handleOutputDeviceChange = useCallback((deviceId) => {
-    if (!isDefined(deviceId)) {
-      return;
-    }
-    const normalizedDeviceId = String(deviceId);
-    pendingOutputDeviceUntilRef.current = Date.now() + 900;
-    setAudioState((previous) => ({
-      ...previous,
-      outputDeviceId: normalizedDeviceId,
-    }));
-    sendCommand({ op: "set_output_device", out: normalizedDeviceId });
-  }, [sendCommand]);
+  const handleAppInputDeviceChange = useCallback(
+    (appId, deviceId) => {
+      const slotIndex = activeHostIndexRef.current;
+      if (!isDefined(deviceId)) {
+        return;
+      }
 
-  const handleInputDeviceChange = useCallback((deviceId) => {
-    if (!isDefined(deviceId)) {
-      return;
-    }
-    const normalizedDeviceId = String(deviceId);
-    pendingInputDeviceUntilRef.current = Date.now() + 900;
-    setAudioState((previous) => ({
-      ...previous,
-      inputDeviceId: normalizedDeviceId,
-    }));
-    sendCommand({ op: "set_input_device", in: normalizedDeviceId });
-  }, [sendCommand]);
+      const normalizedDeviceId = String(deviceId);
+      pendingAppInputDeviceUntilRef.current[slotIndex].set(appId, Date.now() + 900);
+      setHostSlot(slotIndex, (slot) => ({
+        ...slot,
+        audioState: {
+          ...slot.audioState,
+          apps: slot.audioState.apps.map((app) =>
+            app.id === appId ? { ...app, inputDeviceId: normalizedDeviceId } : app
+          ),
+        },
+      }));
+      sendCommand(slotIndex, {
+        op: "set_app_input_device",
+        app: appId,
+        in: normalizedDeviceId,
+      });
+    },
+    [sendCommand, setHostSlot]
+  );
+
+  const handleOutputDeviceChange = useCallback(
+    (deviceId) => {
+      const slotIndex = activeHostIndexRef.current;
+      if (!isDefined(deviceId)) {
+        return;
+      }
+
+      const normalizedDeviceId = String(deviceId);
+      pendingOutputDeviceUntilRef.current[slotIndex] = Date.now() + 900;
+      setHostSlot(slotIndex, (slot) => ({
+        ...slot,
+        audioState: {
+          ...slot.audioState,
+          outputDeviceId: normalizedDeviceId,
+        },
+      }));
+      sendCommand(slotIndex, { op: "set_output_device", out: normalizedDeviceId });
+    },
+    [sendCommand, setHostSlot]
+  );
+
+  const handleInputDeviceChange = useCallback(
+    (deviceId) => {
+      const slotIndex = activeHostIndexRef.current;
+      if (!isDefined(deviceId)) {
+        return;
+      }
+
+      const normalizedDeviceId = String(deviceId);
+      pendingInputDeviceUntilRef.current[slotIndex] = Date.now() + 900;
+      setHostSlot(slotIndex, (slot) => ({
+        ...slot,
+        audioState: {
+          ...slot.audioState,
+          inputDeviceId: normalizedDeviceId,
+        },
+      }));
+      sendCommand(slotIndex, { op: "set_input_device", in: normalizedDeviceId });
+    },
+    [sendCommand, setHostSlot]
+  );
 
   const handlePlaySoundboard = useCallback(() => {
-    sendCommand({ op: "play_soundboard_clip" }, "play_soundboard_clip");
+    const slotIndex = activeHostIndexRef.current;
+    sendCommand(slotIndex, { op: "play_soundboard_clip" }, "play_soundboard_clip");
   }, [sendCommand]);
 
   const handleQRScanText = useCallback(
     (text) => {
+      const slotIndex = activeHostIndexRef.current;
       const parsed = parseQRCode(text);
+
       if (!parsed) {
-        setConnectError("This QR code is not a valid AudioBit pairing QR.");
-        setConnectStatus("idle");
+        setHostSlot(slotIndex, (slot) => ({
+          ...slot,
+          connectError: "This QR code is not a valid AudioBit pairing QR.",
+          connectStatus: "idle",
+        }));
         return false;
       }
 
-      setConnectError("");
-      connectWith(parsed.sid, parsed.code);
+      setHostSlot(slotIndex, (slot) => ({
+        ...slot,
+        connectError: "",
+      }));
+      connectWith(slotIndex, parsed.sid, parsed.code);
       return true;
     },
-    [connectWith]
+    [connectWith, setHostSlot]
   );
 
-  const handleScannerError = useCallback((errorMessage) => {
-    setConnectStatus("idle");
-    setConnectError(errorMessage);
-  }, []);
+  const handleScannerError = useCallback(
+    (errorMessage) => {
+      const slotIndex = activeHostIndexRef.current;
+      setHostSlot(slotIndex, (slot) => ({
+        ...slot,
+        connectStatus: "idle",
+        connectError: errorMessage,
+      }));
+    },
+    [setHostSlot]
+  );
 
   const handleSessionIdChange = useCallback(
     (value) => {
-      resetConnectFeedback();
-      setSessionId(value);
+      const slotIndex = activeHostIndexRef.current;
+      resetConnectFeedback(slotIndex);
+      setHostSlot(slotIndex, (slot) => ({
+        ...slot,
+        sessionId: value,
+      }));
     },
-    [resetConnectFeedback]
+    [resetConnectFeedback, setHostSlot]
   );
 
   const handlePairCodeChange = useCallback(
     (value) => {
-      resetConnectFeedback();
-      setPairCode(value);
+      const slotIndex = activeHostIndexRef.current;
+      resetConnectFeedback(slotIndex);
+      setHostSlot(slotIndex, (slot) => ({
+        ...slot,
+        pairCode: value,
+      }));
     },
-    [resetConnectFeedback]
+    [resetConnectFeedback, setHostSlot]
   );
+
+  const handleAddHost = useCallback(() => {
+    const nextSlotIndex = hostSlotsRef.current.findIndex(
+      (slot) => !slot.relayOnline && slot.connectStatus !== "connecting"
+    );
+
+    if (nextSlotIndex < 0) {
+      showToast("Two host connections are already active.", "warn");
+      return;
+    }
+
+    setActiveHostIndex(nextSlotIndex);
+    setScreen("connect");
+  }, [showToast]);
+
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const sid = (params.get("sid") || "").trim();
+    const code = (params.get("code") || "").replace(/\D/g, "").slice(0, 6);
+
+    if (!sid && !code) {
+      return;
+    }
+
+    setHostSlot(0, (slot) => ({
+      ...slot,
+      sessionId: sid || slot.sessionId,
+      pairCode: code || slot.pairCode,
+    }));
+  }, [setHostSlot]);
 
   useEffect(() => {
     if (autoConnectAttemptedRef.current) {
-      return;
-    }
-    if (screen !== "connect" || connectStatus !== "idle") {
       return;
     }
 
     const params = new URLSearchParams(window.location.search);
     const sid = (params.get("sid") || "").trim();
     const code = (params.get("code") || "").replace(/\D/g, "").slice(0, 6);
+
     if (!sid || code.length !== 6) {
       return;
     }
 
     autoConnectAttemptedRef.current = true;
-    connectWith(sid, code);
-  }, [connectStatus, screen, connectWith]);
+    connectWith(0, sid, code);
+  }, [connectWith]);
+
+  const activeHost = hostSlots[activeHostIndex] ?? hostSlots[0];
+  const canAddHost = hostSlots.some(
+    (slot) => !slot.relayOnline && slot.connectStatus !== "connecting"
+  );
 
   return (
     <>
       {screen === "connect" ? (
         <Connect
-          sessionId={sessionId}
-          pairCode={pairCode}
-          status={connectStatus}
-          error={connectError}
+          hosts={hostSlots}
+          activeHostIndex={activeHostIndex}
+          sessionId={activeHost.sessionId}
+          pairCode={activeHost.pairCode}
+          status={activeHost.connectStatus}
+          error={activeHost.connectError}
+          onSelectHost={selectHostSlot}
           onSessionIdChange={handleSessionIdChange}
           onPairCodeChange={handlePairCodeChange}
-          onConnect={() => connectWith(sessionId, pairCode)}
+          onConnect={() =>
+            connectWith(activeHostIndex, activeHost.sessionId, activeHost.pairCode)
+          }
           onQRScanText={handleQRScanText}
           onScannerError={handleScannerError}
         />
       ) : (
         <Control
-          connected={relayOnline}
-          state={audioState}
-          pulseKey={pulseKey}
+          connected={activeHost.relayOnline}
+          hosts={hostSlots}
+          activeHostIndex={activeHostIndex}
+          activeSessionId={activeHost.sessionId}
+          state={activeHost.audioState}
+          pulseKey={activeHost.pulseKey}
+          canAddHost={canAddHost}
+          onSelectHost={selectHostSlot}
+          onAddHost={handleAddHost}
           onMasterVolumeChange={handleMasterVolumeChange}
           onMasterMuteToggle={handleMasterMuteToggle}
           onMicToggle={handleMicToggle}

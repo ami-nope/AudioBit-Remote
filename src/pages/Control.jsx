@@ -5,8 +5,14 @@ import DeviceControls from "../components/DeviceControls";
 
 export default function Control({
   connected,
+  hosts,
+  activeHostIndex,
+  activeSessionId,
   state,
   pulseKey,
+  canAddHost,
+  onSelectHost,
+  onAddHost,
   onMasterVolumeChange,
   onMasterMuteToggle,
   onMicToggle,
@@ -21,7 +27,15 @@ export default function Control({
   return (
     <main className="screen control-screen">
       <div className="control-shell">
-        <Header connected={connected} />
+        <Header
+          connected={connected}
+          hosts={hosts}
+          activeHostIndex={activeHostIndex}
+          activeSessionId={activeSessionId}
+          canAddHost={canAddHost}
+          onSelectHost={onSelectHost}
+          onAddHost={onAddHost}
+        />
         <MasterVolume
           volume={state.masterVolume}
           masterMuted={state.masterMuted}

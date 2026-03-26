@@ -79,6 +79,8 @@ button {
 .connect-card {
   width: min(560px, 100%);
   padding: 1.5rem;
+  display: grid;
+  gap: 1rem;
   animation: rise-in 380ms ease both;
 }
 
@@ -107,7 +109,6 @@ button {
 }
 
 .connect-method {
-  margin-top: 1rem;
   display: grid;
   gap: 0.85rem;
 }
@@ -410,7 +411,6 @@ button {
 }
 
 .manual-form {
-  margin-top: 1rem;
   display: grid;
   gap: 0.8rem;
 }
@@ -555,12 +555,131 @@ button {
   gap: 0.9rem;
 }
 
-.top-header {
-  padding: 0.86rem 0.95rem;
-  border-radius: 24px;
+.host-switcher {
+  display: grid;
+  gap: 0.7rem;
+}
+
+.host-switcher-list {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.65rem;
+}
+
+.host-chip,
+.host-add-btn {
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  background: rgba(255, 255, 255, 0.04);
+  color: inherit;
+  cursor: pointer;
+  transition: transform 180ms ease, border-color 180ms ease, background 180ms ease;
+}
+
+.host-chip:hover,
+.host-add-btn:hover {
+  border-color: rgba(255, 138, 43, 0.55);
+  background: rgba(255, 138, 43, 0.1);
+}
+
+.host-chip:active,
+.host-add-btn:active {
+  transform: scale(0.985);
+}
+
+.host-chip {
+  min-width: 0;
+  border-radius: 20px;
+  padding: 0.8rem 0.9rem;
+  display: grid;
+  gap: 0.42rem;
+  text-align: left;
+}
+
+.host-chip.is-active {
+  border-color: rgba(255, 138, 43, 0.72);
+  background: rgba(255, 138, 43, 0.14);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.05);
+}
+
+.host-chip-top {
   display: flex;
   align-items: center;
   justify-content: space-between;
+  gap: 0.65rem;
+}
+
+.host-chip-title {
+  font-size: 0.86rem;
+  font-weight: 700;
+}
+
+.host-chip-meta {
+  min-width: 0;
+  color: #c7bcdf;
+  font-size: 0.76rem;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.host-chip-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.28rem;
+  border-radius: 999px;
+  padding: 0.18rem 0.52rem;
+  font-size: 0.7rem;
+  font-weight: 700;
+  border: 1px solid transparent;
+  flex-shrink: 0;
+}
+
+.host-chip-status-ok {
+  color: #d7ffe9;
+  background: rgba(97, 215, 156, 0.16);
+  border-color: rgba(97, 215, 156, 0.38);
+}
+
+.host-chip-status-warn {
+  color: #ffe7c8;
+  background: rgba(255, 190, 115, 0.16);
+  border-color: rgba(255, 190, 115, 0.4);
+}
+
+.host-chip-status-danger {
+  color: #ffdada;
+  background: rgba(255, 106, 106, 0.16);
+  border-color: rgba(255, 106, 106, 0.38);
+}
+
+.host-chip-status-idle {
+  color: #dfd5f3;
+  background: rgba(255, 255, 255, 0.06);
+  border-color: rgba(255, 255, 255, 0.14);
+}
+
+.host-add-btn {
+  border-radius: 18px;
+  padding: 0.76rem 0.88rem;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.45rem;
+  font-weight: 650;
+}
+
+.top-header {
+  padding: 0.86rem 0.95rem;
+  border-radius: 24px;
+  display: grid;
+  gap: 0.8rem;
+}
+
+.header-row {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 0.8rem;
 }
 
 .brand {
@@ -588,6 +707,24 @@ button {
   margin: 0.1rem 0 0;
   color: #c4b9e0;
   font-size: 0.75rem;
+}
+
+.header-meta {
+  min-width: 0;
+  display: grid;
+  gap: 0.38rem;
+  justify-items: end;
+}
+
+.header-session {
+  max-width: min(52vw, 360px);
+  margin: 0;
+  color: #d9cfee;
+  font-size: 0.75rem;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  text-align: right;
 }
 
 .status-pill {
@@ -991,6 +1128,28 @@ button {
 }
 
 @media (max-width: 540px) {
+  .host-switcher-list {
+    grid-template-columns: 1fr;
+  }
+
+  .host-chip-top,
+  .header-row {
+    align-items: flex-start;
+  }
+
+  .header-row {
+    display: grid;
+  }
+
+  .header-meta {
+    justify-items: start;
+  }
+
+  .header-session {
+    max-width: 100%;
+    text-align: left;
+  }
+
   .scanner-shell,
   .qr-region {
     min-height: 280px;
