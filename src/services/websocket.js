@@ -1,4 +1,4 @@
-const DEFAULT_URL = "wss://audiobit-relay-production.up.railway.app/ws";
+import { getCachedExternalLinks } from "./externalLinks";
 
 const safeParse = (value) => {
   try {
@@ -9,7 +9,7 @@ const safeParse = (value) => {
 };
 
 export class AudioBitWebSocket {
-  constructor(url = DEFAULT_URL) {
+  constructor(url = getCachedExternalLinks().relay.wsUrl) {
     this.url = url;
     this.ws = null;
     this.handlers = {};
@@ -63,10 +63,11 @@ export class AudioBitWebSocket {
         return;
       }
 
-      if (type === "error" || type === "hello_error" || type === "pair_error") {
+      if (type === "err" || type === "error" || type === "hello_error" || type === "pair_error") {
         const msg =
           payload.msg ||
           payload.error ||
+          payload.message ||
           payload.reason ||
           "Unable to connect to AudioBit relay.";
         this.handlers.onError?.(msg, payload);
@@ -131,5 +132,3 @@ export class AudioBitWebSocket {
     this.ready = false;
   }
 }
-
-export const RELAY_WS_URL = DEFAULT_URL;

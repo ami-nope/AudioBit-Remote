@@ -1,9 +1,11 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import Connect from "./pages/Connect";
 import Control from "./pages/Control";
-import { AudioBitWebSocket, RELAY_WS_URL } from "./services/websocket";
+import { getExternalLinks } from "./services/externalLinks";
+import { AudioBitWebSocket } from "./services/websocket";
 
 const HOST_CONNECTION_LIMIT = 2;
+const RECONNECT_DELAYS_MS = [1000, 2000, 4000, 8000, 10000];
 
 const createInitialAudioState = () => ({
   masterVolume: 70,
@@ -30,9 +32,13 @@ const createInitialHostSlots = () =>
   Array.from({ length: HOST_CONNECTION_LIMIT }, () => createHostSlot());
 
 const getHostLabel = (slotIndex) => `Host ${slotIndex + 1}`;
+const isHostSlotBusy = (slot) =>
+  slot.relayOnline ||
+  slot.connectStatus === "connecting" ||
+  slot.connectStatus === "reconnecting";
 
-const findOtherConnectedHostIndex = (hostSlots, excludedIndex) =>
-  hostSlots.findIndex((slot, index) => index !== excludedIndex && slot.relayOnline);
+const getReconnectDelay = (attempt) =>
+  RECONNECT_DELAYS_MS[Math.min(attempt, RECONNECT_DELAYS_MS.length - 1)];
 
 const clampPercent = (value) => {
   const parsed = Number(value);
@@ -327,7 +333,17 @@ const readObject = (value) => {
   );
 };
 
-const parseQRCode = (text) => {
+const buildConnectUrlCandidate = (raw, connectBaseUrl) => {
+  try {
+    const url = new URL(connectBaseUrl);
+    url.search = raw.startsWith("?") ? raw.slice(1) : raw;
+    return url.toString();
+  } catch {
+    return connectBaseUrl;
+  }
+};
+
+const parseQRCode = (text, connectBaseUrl) => {
   const raw = String(text ?? "").trim();
   if (!raw) {
     return null;
@@ -345,10 +361,12 @@ const parseQRCode = (text) => {
   }
 
   const urlCandidates = [raw];
-  if (!raw.includes("://") && (raw.includes("=") || raw.startsWith("?"))) {
-    urlCandidates.push(
-      `https://pair.audiobit.app/${raw.startsWith("?") ? raw : `?${raw}`}`
-    );
+  if (
+    connectBaseUrl &&
+    !raw.includes("://") &&
+    (raw.includes("=") || raw.startsWith("?"))
+  ) {
+    urlCandidates.push(buildConnectUrlCandidate(raw, connectBaseUrl));
   }
 
   for (const candidate of urlCandidates) {
@@ -394,11 +412,16 @@ export default function App() {
   const toastTimeoutRef = useRef(null);
   const socketsRef = useRef(Array.from({ length: HOST_CONNECTION_LIMIT }, () => null));
   const pairingTimeoutRef = useRef(Array.from({ length: HOST_CONNECTION_LIMIT }, () => null));
+  const reconnectTimeoutRef = useRef(
+    Array.from({ length: HOST_CONNECTION_LIMIT }, () => null)
+  );
+  const reconnectAttemptRef = useRef(Array.from({ length: HOST_CONNECTION_LIMIT }, () => 0));
   const transitionTimeoutRef = useRef(
     Array.from({ length: HOST_CONNECTION_LIMIT }, () => null)
   );
   const pulseTimeoutRef = useRef(Array.from({ length: HOST_CONNECTION_LIMIT }, () => null));
   const autoConnectAttemptedRef = useRef(false);
+  const externalLinksRef = useRef(null);
   const masterVolumeDebounceRef = useRef(
     Array.from({ length: HOST_CONNECTION_LIMIT }, () => null)
   );
@@ -436,6 +459,20 @@ export default function App() {
     activeHostIndexRef.current = activeHostIndex;
   }, [activeHostIndex]);
 
+  useEffect(() => {
+    let cancelled = false;
+
+    void getExternalLinks().then((externalLinks) => {
+      if (!cancelled) {
+        externalLinksRef.current = externalLinks;
+      }
+    });
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
   const clearSlotTimeout = useCallback((timeoutsRef, slotIndex) => {
     const timeoutId = timeoutsRef.current[slotIndex];
     if (!timeoutId) {
@@ -455,6 +492,14 @@ export default function App() {
       })
     );
   }, []);
+
+  const resetReconnectState = useCallback(
+    (slotIndex) => {
+      clearSlotTimeout(reconnectTimeoutRef, slotIndex);
+      reconnectAttemptRef.current[slotIndex] = 0;
+    },
+    [clearSlotTimeout]
+  );
 
   const showToast = useCallback((message, tone = "ok") => {
     if (toastTimeoutRef.current) {
@@ -490,9 +535,12 @@ export default function App() {
   );
 
   const disposeHostConnection = useCallback(
-    (slotIndex) => {
+    (slotIndex, { resetReconnect = true } = {}) => {
       clearSlotTimeout(pairingTimeoutRef, slotIndex);
       clearSlotTimeout(transitionTimeoutRef, slotIndex);
+      if (resetReconnect) {
+        resetReconnectState(slotIndex);
+      }
       clearHostCommandState(slotIndex);
 
       const socket = socketsRef.current[slotIndex];
@@ -503,7 +551,7 @@ export default function App() {
       socket.close();
       socketsRef.current[slotIndex] = null;
     },
-    [clearHostCommandState, clearSlotTimeout]
+    [clearHostCommandState, clearSlotTimeout, resetReconnectState]
   );
 
   useEffect(
@@ -541,13 +589,32 @@ export default function App() {
 
   const resetConnectFeedback = useCallback(
     (slotIndex) => {
+      const slot = hostSlotsRef.current[slotIndex];
+      if (
+        slot &&
+        (slot.connectStatus === "connecting" || slot.connectStatus === "reconnecting")
+      ) {
+        disposeHostConnection(slotIndex);
+      } else {
+        resetReconnectState(slotIndex);
+      }
+
       setHostSlot(slotIndex, (slot) => ({
         ...slot,
         connectError: "",
-        connectStatus: slot.connectStatus === "error" ? "idle" : slot.connectStatus,
+        connectStatus:
+          slot.connectStatus === "error" ||
+          slot.connectStatus === "connecting" ||
+          slot.connectStatus === "reconnecting"
+            ? "idle"
+            : slot.connectStatus,
+        relayOnline:
+          slot.connectStatus === "connecting" || slot.connectStatus === "reconnecting"
+            ? false
+            : slot.relayOnline,
       }));
     },
-    [setHostSlot]
+    [disposeHostConnection, resetReconnectState, setHostSlot]
   );
 
   const selectHostSlot = useCallback((slotIndex) => {
@@ -558,18 +625,32 @@ export default function App() {
       return;
     }
 
-    setScreen(slot.relayOnline || slot.connectStatus === "connected" ? "control" : "connect");
+    setScreen(
+      slot.relayOnline ||
+        slot.connectStatus === "connected" ||
+        slot.connectStatus === "reconnecting"
+        ? "control"
+        : "connect"
+    );
   }, []);
 
   const connectWith = useCallback(
-    (slotIndex, sid, code) => {
+    async function connectWithInternal(
+      slotIndex,
+      sid,
+      code,
+      { reconnectMode = false } = {}
+    ) {
       const normalizedSid = sid.trim();
       const normalizedCode = code.replace(/\D/g, "").slice(0, 6);
 
-      setActiveHostIndex(slotIndex);
-      setScreen("connect");
+      if (!reconnectMode) {
+        setActiveHostIndex(slotIndex);
+        setScreen("connect");
+      }
 
       if (!normalizedSid || normalizedCode.length !== 6) {
+        resetReconnectState(slotIndex);
         setHostSlot(slotIndex, (slot) => ({
           ...slot,
           connectError: "Enter a valid Session ID and 6-digit pairing code.",
@@ -578,23 +659,60 @@ export default function App() {
         return;
       }
 
-      disposeHostConnection(slotIndex);
+      disposeHostConnection(slotIndex, { resetReconnect: !reconnectMode });
       setHostSlot(slotIndex, (slot) => ({
         ...slot,
         sessionId: normalizedSid,
         pairCode: normalizedCode,
-        connectStatus: "connecting",
+        connectStatus: reconnectMode ? "reconnecting" : "connecting",
         connectError: "",
         relayOnline: false,
         pulseKey: "",
       }));
 
-      const socket = new AudioBitWebSocket(RELAY_WS_URL);
+      const externalLinks = await getExternalLinks();
+      externalLinksRef.current = externalLinks;
+
+      const socket = new AudioBitWebSocket(externalLinks.relay.wsUrl);
       socketsRef.current[slotIndex] = socket;
 
       let established = false;
       let connectFailureMessage = "";
       let failureToastShown = false;
+
+      const scheduleReconnect = () => {
+        const currentSlot = hostSlotsRef.current[slotIndex];
+        if (!currentSlot) {
+          return;
+        }
+
+        const latestSid = currentSlot.sessionId.trim();
+        const latestCode = currentSlot.pairCode.replace(/\D/g, "").slice(0, 6);
+        if (latestSid !== normalizedSid || latestCode !== normalizedCode) {
+          return;
+        }
+
+        clearSlotTimeout(reconnectTimeoutRef, slotIndex);
+
+        const attempt = reconnectAttemptRef.current[slotIndex];
+        const delay = getReconnectDelay(attempt);
+        reconnectAttemptRef.current[slotIndex] = attempt + 1;
+
+        setHostSlot(slotIndex, (slot) => ({
+          ...slot,
+          connectStatus: "reconnecting",
+          connectError: "",
+          relayOnline: false,
+          pulseKey: "",
+        }));
+
+        reconnectTimeoutRef.current[slotIndex] = setTimeout(() => {
+          reconnectTimeoutRef.current[slotIndex] = null;
+          void connectWithInternal(slotIndex, normalizedSid, normalizedCode, {
+            reconnectMode: true,
+          });
+        }, delay);
+      };
 
       const onConnected = () => {
         if (established || socketsRef.current[slotIndex] !== socket) {
@@ -602,6 +720,8 @@ export default function App() {
         }
 
         established = true;
+        const wasReconnecting = reconnectMode || reconnectAttemptRef.current[slotIndex] > 0;
+        resetReconnectState(slotIndex);
         clearSlotTimeout(pairingTimeoutRef, slotIndex);
         setHostSlot(slotIndex, (slot) => ({
           ...slot,
@@ -624,6 +744,11 @@ export default function App() {
           return;
         }
 
+        if (wasReconnecting) {
+          showToast(`${getHostLabel(slotIndex)} reconnected.`, "ok");
+          return;
+        }
+
         showToast(`${getHostLabel(slotIndex)} connected.`, "ok");
       };
 
@@ -632,9 +757,16 @@ export default function App() {
           return;
         }
 
-        connectFailureMessage = "Pairing timed out. Confirm session ID and code.";
+        connectFailureMessage = reconnectMode
+          ? "Reconnect attempt timed out."
+          : "Pairing timed out. Confirm session ID and code.";
         socket.close();
         pairingTimeoutRef.current[slotIndex] = null;
+
+        if (reconnectMode) {
+          return;
+        }
+
         setHostSlot(slotIndex, (slot) => ({
           ...slot,
           relayOnline: false,
@@ -778,6 +910,10 @@ export default function App() {
             }
 
             connectFailureMessage = message;
+            if (reconnectMode) {
+              return;
+            }
+
             clearSlotTimeout(pairingTimeoutRef, slotIndex);
             setHostSlot(slotIndex, (slot) => ({
               ...slot,
@@ -802,6 +938,11 @@ export default function App() {
             clearHostCommandState(slotIndex);
 
             if (!established) {
+              if (reconnectMode) {
+                scheduleReconnect();
+                return;
+              }
+
               const message =
                 connectFailureMessage || "Connection closed before pairing completed.";
 
@@ -828,27 +969,19 @@ export default function App() {
               return;
             }
 
-            const fallbackHostIndex = findOtherConnectedHostIndex(
-              hostSlotsRef.current,
-              slotIndex
-            );
-
             setHostSlot(slotIndex, (slot) => ({
               ...slot,
-              connectStatus: "idle",
+              connectStatus: "reconnecting",
               relayOnline: false,
+              connectError: "",
               pulseKey: "",
             }));
 
-            if (activeHostIndexRef.current === slotIndex && screenRef.current === "control") {
-              if (fallbackHostIndex >= 0) {
-                setActiveHostIndex(fallbackHostIndex);
-              } else {
-                setScreen("connect");
-              }
-            }
-
-            showToast(`${getHostLabel(slotIndex)} disconnected from AudioBit relay.`, "warn");
+            showToast(
+              `${getHostLabel(slotIndex)} disconnected from AudioBit relay. Reconnecting...`,
+              "warn"
+            );
+            scheduleReconnect();
           },
         },
       });
@@ -857,6 +990,7 @@ export default function App() {
       clearHostCommandState,
       clearSlotTimeout,
       disposeHostConnection,
+      resetReconnectState,
       setHostSlot,
       showToast,
     ]
@@ -1099,9 +1233,12 @@ export default function App() {
   }, [sendCommand]);
 
   const handleQRScanText = useCallback(
-    (text) => {
+    async (text) => {
       const slotIndex = activeHostIndexRef.current;
-      const parsed = parseQRCode(text);
+      const externalLinks =
+        externalLinksRef.current ?? (await getExternalLinks());
+      externalLinksRef.current = externalLinks;
+      const parsed = parseQRCode(text, externalLinks.remoteWeb.connectBaseUrl);
 
       if (!parsed) {
         setHostSlot(slotIndex, (slot) => ({
@@ -1116,7 +1253,7 @@ export default function App() {
         ...slot,
         connectError: "",
       }));
-      connectWith(slotIndex, parsed.sid, parsed.code);
+      void connectWith(slotIndex, parsed.sid, parsed.code);
       return true;
     },
     [connectWith, setHostSlot]
@@ -1159,9 +1296,7 @@ export default function App() {
   );
 
   const handleAddHost = useCallback(() => {
-    const nextSlotIndex = hostSlotsRef.current.findIndex(
-      (slot) => !slot.relayOnline && slot.connectStatus !== "connecting"
-    );
+    const nextSlotIndex = hostSlotsRef.current.findIndex((slot) => !isHostSlotBusy(slot));
 
     if (nextSlotIndex < 0) {
       showToast("Two host connections are already active.", "warn");
@@ -1202,12 +1337,12 @@ export default function App() {
     }
 
     autoConnectAttemptedRef.current = true;
-    connectWith(0, sid, code);
+    void connectWith(0, sid, code);
   }, [connectWith]);
 
   const activeHost = hostSlots[activeHostIndex] ?? hostSlots[0];
   const canAddHost = hostSlots.some(
-    (slot) => !slot.relayOnline && slot.connectStatus !== "connecting"
+    (slot) => !isHostSlotBusy(slot)
   );
 
   return (
@@ -1224,7 +1359,7 @@ export default function App() {
           onSessionIdChange={handleSessionIdChange}
           onPairCodeChange={handlePairCodeChange}
           onConnect={() =>
-            connectWith(activeHostIndex, activeHost.sessionId, activeHost.pairCode)
+            void connectWith(activeHostIndex, activeHost.sessionId, activeHost.pairCode)
           }
           onQRScanText={handleQRScanText}
           onScannerError={handleScannerError}
@@ -1232,6 +1367,7 @@ export default function App() {
       ) : (
         <Control
           connected={activeHost.relayOnline}
+          status={activeHost.connectStatus}
           hosts={hostSlots}
           activeHostIndex={activeHostIndex}
           activeSessionId={activeHost.sessionId}

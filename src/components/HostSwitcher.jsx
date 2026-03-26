@@ -4,6 +4,9 @@ const getHostStatus = (host) => {
   if (host.relayOnline || host.connectStatus === "connected") {
     return { label: "Online", tone: "ok" };
   }
+  if (host.connectStatus === "reconnecting") {
+    return { label: "Reconnecting", tone: "warn" };
+  }
   if (host.connectStatus === "connecting") {
     return { label: "Connecting", tone: "warn" };
   }
@@ -19,6 +22,9 @@ const getHostStatus = (host) => {
 const getHostMeta = (host) => {
   if (host.sessionId) {
     return host.sessionId;
+  }
+  if (host.connectStatus === "reconnecting") {
+    return "Retrying relay connection";
   }
   if (host.connectStatus === "connecting") {
     return "Pairing in progress";
@@ -42,7 +48,8 @@ export default function HostSwitcher({
       <div className="host-switcher-list">
         {hosts.map((host, index) => {
           const status = getHostStatus(host);
-          const isConnecting = host.connectStatus === "connecting";
+          const isConnecting =
+            host.connectStatus === "connecting" || host.connectStatus === "reconnecting";
 
           return (
             <button

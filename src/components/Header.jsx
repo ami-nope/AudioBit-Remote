@@ -2,6 +2,7 @@ import HostSwitcher from "./HostSwitcher";
 
 export default function Header({
   connected,
+  status,
   hosts,
   activeHostIndex,
   activeSessionId,
@@ -9,6 +10,15 @@ export default function Header({
   canAddHost,
   onAddHost,
 }) {
+  const statusLabel =
+    status === "reconnecting"
+      ? "Reconnecting"
+      : status === "connecting"
+        ? "Connecting"
+        : connected
+          ? "Online"
+          : "Offline";
+
   return (
     <header className="top-header panel">
       <div className="header-row">
@@ -27,7 +37,7 @@ export default function Header({
               : `Host ${activeHostIndex + 1}`}
           </p>
           <span className={`status-pill ${connected ? "ok" : "warn"}`}>
-            {connected ? "Online" : "Offline"}
+            {statusLabel}
           </span>
         </div>
       </div>

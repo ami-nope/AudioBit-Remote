@@ -19,7 +19,8 @@ export default function Connect({
 }) {
   const [scannerOpen, setScannerOpen] = useState(false);
 
-  const isConnecting = status === "connecting";
+  const isReconnecting = status === "reconnecting";
+  const isConnecting = status === "connecting" || isReconnecting;
   const isConnected = status === "connected";
   const canSubmit = useMemo(
     () =>
@@ -120,7 +121,11 @@ export default function Connect({
               disabled={!canSubmit}
               onClick={onConnect}
             >
-              {isConnecting ? "Connecting..." : `Connect Host ${activeHostIndex + 1}`}
+              {isReconnecting
+                ? "Reconnecting..."
+                : isConnecting
+                  ? "Connecting..."
+                  : `Connect Host ${activeHostIndex + 1}`}
             </button>
           </>
         )}

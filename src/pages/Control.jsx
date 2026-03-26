@@ -5,6 +5,7 @@ import DeviceControls from "../components/DeviceControls";
 
 export default function Control({
   connected,
+  status,
   hosts,
   activeHostIndex,
   activeSessionId,
@@ -29,6 +30,7 @@ export default function Control({
       <div className="control-shell">
         <Header
           connected={connected}
+          status={status}
           hosts={hosts}
           activeHostIndex={activeHostIndex}
           activeSessionId={activeSessionId}
